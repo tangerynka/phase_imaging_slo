@@ -70,8 +70,8 @@ class PhasePresenter:
     
     def on_ch2_in_changed(self):
         dirc = self.view.lineEdit_ch2_in.text()
-        self.filename_ch1 = basename(dirc)
-        self.dirname_ch1 = dirname(dirc)
+        self.filename_ch2 = basename(dirc)
+        self.dirname_ch2 = dirname(dirc)
         self.set_save_path_for_channel(2)
 
     def on_ch1_in_clicked(self):
@@ -120,8 +120,21 @@ class PhasePresenter:
         dirc = self.get_directory(directory=True)
         self.view.lineEdit_save_path_ch2.setText(dirc)
 
+    def clear_image_labels(self):
+        self.view.imageLabel_ch1.axes.clear()
+        self.view.imageLabel_ch1.draw()
+        self.view.imageLabel_ch2.axes.clear()
+        self.view.imageLabel_ch2.draw()
+        self.view.imageLabel_output1.axes.clear()
+        self.view.imageLabel_output1.draw()
+        self.view.imageLabel_output2.axes.clear()
+        self.view.imageLabel_output2.draw()
+        self.view.imageLabel_preview.axes.clear()
+        self.view.imageLabel_preview.draw()
+
     def on_load_single_clicked(self):
         # Load single image for ch1 and ch2, store as ndarrays 
+        self.clear_image_labels()
         imgs_ch1, imgs_ch2 = [], []
         if hasattr(self, 'filename_ch1') and hasattr(self, 'dirname_ch1'):
             path_ch1 = os.path.join(self.dirname_ch1, self.filename_ch1)
