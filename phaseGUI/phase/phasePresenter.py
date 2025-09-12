@@ -4,7 +4,8 @@ import cv2
 from natsort import natsorted
 import numpy as np
 import os
-
+from .crop_data import get_strict_inner_square_bbox, extract_square_by_bbox, put_back
+import datetime
 
 class PhasePresenter:
     def __init__(self, view, model):
@@ -99,6 +100,7 @@ class PhasePresenter:
 
     def on_save_clicked(self):
         # Save results for each channel in phase/<method>/
+
         technique = self.technique_index
         method_name = self.TECHNIQUE_MODEL_MAP.get(technique, "unknown")
         for ch in [1, 2]:
@@ -111,6 +113,36 @@ class PhasePresenter:
                     out_path = join(method_dir, f"result_{i:04d}.png")
                     cv2.imwrite(out_path, img)
                 print(f"Saved {imgs.shape[0]} images for channel {ch} to {method_dir}")
+
+                # Save AVI video if more than 1 image
+                if imgs.shape[0] > 1:
+                    now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    avi_path = join(save_base, f"{method_name}_{now_str}.avi")
+
+                    if imgs[0].ndim == 2:
+                        height, width = imgs[0].shape
+                    else:
+                        height, width = imgs[0].shape[:2]
+
+                    # Use MJPG for compatibility (works in ImageJ & most players)
+                    fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+                    out = cv2.VideoWriter(avi_path, fourcc, 30, (width, height), isColor=True)
+
+                    for img in imgs:
+                        # Ensure 8-bit range
+                        if img.dtype != np.uint8:
+                            img8 = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                        else:
+                            img8 = img
+
+                        # If grayscale → replicate into 3 channels
+                        if img8.ndim == 2:
+                            img8 = cv2.cvtColor(img8, cv2.COLOR_GRAY2BGR)
+
+                        out.write(img8)
+
+                    out.release()
+                    print(f"Saved grayscale-looking AVI video for channel {ch} to {avi_path}")
 
     def on_save_path_ch1_clicked(self):
         dirc = self.get_directory(directory=True)
@@ -137,7 +169,7 @@ class PhasePresenter:
         self.clear_image_labels()
         imgs_ch1, imgs_ch2 = [], []
         if hasattr(self, 'filename_ch1') and hasattr(self, 'dirname_ch1'):
-            path_ch1 = os.path.join(self.dirname_ch1, self.filename_ch1)
+            path_ch1 = join(self.dirname_ch1, self.filename_ch1)
             img_ch1 = cv2.imread(path_ch1, cv2.IMREAD_GRAYSCALE)
             if img_ch1 is not None:
                 imgs_ch1.append(img_ch1)
@@ -145,7 +177,7 @@ class PhasePresenter:
             else:
                 print(f"Failed to load image: {path_ch1}")
         if hasattr(self, 'filename_ch2') and hasattr(self, 'dirname_ch2'):
-            path_ch2 = os.path.join(self.dirname_ch2, self.filename_ch2)
+            path_ch2 = join(self.dirname_ch2, self.filename_ch2)
             img_ch2 = cv2.imread(path_ch2, cv2.IMREAD_GRAYSCALE)
             if img_ch2 is not None:
                 imgs_ch2.append(img_ch2)
@@ -173,7 +205,7 @@ class PhasePresenter:
         if hasattr(self, 'dirname_ch1'):
             files_ch1 = natsorted([f for f in os.listdir(self.dirname_ch1) if f.lower().endswith('.png')])
             for fname in files_ch1:
-                path = os.path.join(self.dirname_ch1, fname)
+                path = join(self.dirname_ch1, fname)
                 img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
                 if img is not None:
                     imgs_ch1.append(img)
@@ -181,7 +213,7 @@ class PhasePresenter:
         if hasattr(self, 'dirname_ch2'):
             files_ch2 = natsorted([f for f in os.listdir(self.dirname_ch2) if f.lower().endswith('.png')])
             for fname in files_ch2:
-                path = os.path.join(self.dirname_ch2, fname)
+                path = join(self.dirname_ch2, fname)
                 img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
                 if img is not None:
                     imgs_ch2.append(img)
@@ -206,83 +238,105 @@ class PhasePresenter:
         # Call the computation for the selected technique and reference
         technique = self.technique_index
         imgs_ch1 = self.imgs_ch1 if hasattr(self, 'imgs_ch1') and self.imgs_ch1 is not None and self.imgs_ch1.shape[0] > 0 else None
-        imgs_ch2 = self.imgs_ch2 if hasattr(self, 'imgs_ch2') and self.imgs_ch2.shape[0] > 0 else None
+        imgs_ch2 = self.imgs_ch2 if hasattr(self, 'imgs_ch2') and self.imgs_ch2 is not None and self.imgs_ch2.shape[0] > 0 else None
         self.results_ch1 = self.masks_ch1 = self.results_ch2 = self.masks_ch2 = None
-        # Compute for both channels if available, preallocating arrays
-        if imgs_ch1 is not None:
-            n, h, w = imgs_ch1.shape
-            self.results_ch1 = np.empty((n, h, w), dtype=np.float32)
-            self.masks_ch1 = np.empty((n, h, w), dtype=np.uint8)
-            if technique == 0:
-                rho1 = self.view.spinBox_darkfield_rho1.value()
-                rho2 = self.view.spinBox_darkfield_rho2.value()
-                for i, img in enumerate(imgs_ch1):
-                    out, mask = self.model.darfield(img, rho1, rho2)
+
+        n1 = imgs_ch1.shape[0] if imgs_ch1 is not None else 0
+        n2 = imgs_ch2.shape[0] if imgs_ch2 is not None else 0
+        n = max(n1, n2)
+        # Preallocate results arrays with original image shape
+        if n1 > 0:
+            h1, w1 = imgs_ch1.shape[1:]
+            self.results_ch1 = np.empty((n1, h1, w1), dtype=np.float32)
+            self.masks_ch1 = np.empty((n1, h1, w1), dtype=np.uint8)
+        if n2 > 0:
+            h2, w2 = imgs_ch2.shape[1:]
+            self.results_ch2 = np.empty((n2, h2, w2), dtype=np.float32)
+            self.masks_ch2 = np.empty((n2, h2, w2), dtype=np.uint8)
+
+        # Get parameters for the selected technique
+        if technique == 0:
+            rho1 = self.view.spinBox_darkfield_rho1.value()
+            rho2 = self.view.spinBox_darkfield_rho2.value()
+        elif technique == 1:
+            rho1 = self.view.spinBox_psdarkfield_rho1.value()
+            rho2 = self.view.spinBox_psdarkfield_rho2.value()
+            phaseshift = self.view.spinBox_psdarkfield_phaseshift.value()
+        elif technique == 2:
+            rho1 = self.view.spinBox_iwdarkfield_rho1.value()
+            rho2 = self.view.spinBox_iwdarkfield_rho2.value()
+            alpha = self.view.spinBox_iwdarkfield_alpha.value()
+        elif technique == 3:
+            rho1 = self.view.spinBox_sdarkfield_rho1.value()
+            rho2 = self.view.spinBox_sdarkfield_rho2.value()
+            m = self.view.spinBox_sdarkfield_m.value()
+
+        # For each image pair, crop, process, and put back
+
+        for i in range(n):
+            img1 = imgs_ch1[i] if imgs_ch1 is not None and i < n1 else None
+            img2 = imgs_ch2[i] if imgs_ch2 is not None and i < n2 else None
+
+            # Calculate bbox from img1 (if present)
+            bbox = get_strict_inner_square_bbox(img1) if img1 is not None else None
+            if i == 0:
+                first_bbox = bbox
+            # If bbox is (0,0,...) skip extracting square and just process the whole image
+            skip_extract = False
+            if bbox is not None and len(bbox) >= 2 and bbox[0] == 0 and bbox[1] == 0:
+                skip_extract = True
+
+            # Crop both images using bbox unless skipping
+            content1 = img1 if skip_extract else (extract_square_by_bbox(img1, bbox) if img1 is not None and bbox is not None else None)
+            content2 = img2 if skip_extract else (extract_square_by_bbox(img2, bbox) if img2 is not None and bbox is not None else None)
+
+
+            # Process channel 1
+            if img1 is not None:
+                # If content1 is None, run darkfield on full image
+                proc_input = content1 if content1 is not None else img1
+                if technique == 0:
+                    out, mask = self.model.darkfield(proc_input, rho1, rho2)
+                elif technique == 1:
+                    out, mask = self.model.phase_shifted_darkfield(proc_input, rho1, rho2, phaseshift)
+                elif technique == 2:
+                    out, mask = self.model.intensity_weighted_darkfield(proc_input, rho1, rho2, alpha)
+                elif technique == 3:
+                    out, mask = self.model.spiral_darkfield(proc_input, rho1, rho2, m)
+                if skip_extract or content1 is None:
                     self.results_ch1[i] = out
-                    self.masks_ch1[i] = mask
-            elif technique == 1:
-                rho1 = self.view.spinBox_psdarkfield_rho1.value()
-                rho2 = self.view.spinBox_psdarkfield_rho2.value()
-                phaseshift = self.view.spinBox_psdarkfield_phaseshift.value()
-                for i, img in enumerate(imgs_ch1):
-                    out, mask = self.model.phase_shifted_darkfield(img, rho1, rho2, phaseshift)
-                    self.results_ch1[i] = out
-                    self.masks_ch1[i] = mask
-            elif technique == 2:
-                rho1 = self.view.spinBox_iwdarkfield_rho1.value()
-                rho2 = self.view.spinBox_iwdarkfield_rho2.value()
-                alpha = self.view.spinBox_iwdarkfield_alpha.value()
-                for i, img in enumerate(imgs_ch1):
-                    out, mask = self.model.intensity_weighted_darkfield(img, rho1, rho2, alpha)
-                    self.results_ch1[i] = out
-                    self.masks_ch1[i] = mask
-            elif technique == 3:
-                rho1 = self.view.spinBox_sdarkfield_rho1.value()
-                rho2 = self.view.spinBox_sdarkfield_rho2.value()
-                m = self.view.spinBox_sdarkfield_m.value()
-                for i, img in enumerate(imgs_ch1):
-                    out, mask = self.model.spiral_darkfield(img, rho1, rho2, m)
-                    self.results_ch1[i] = out
-                    self.masks_ch1[i] = mask
-        if imgs_ch2 is not None:
-            n, h, w = imgs_ch2.shape
-            self.results_ch2 = np.empty((n, h, w), dtype=np.float32)
-            self.masks_ch2 = np.empty((n, h, w), dtype=np.uint8)
-            if technique == 0:
-                rho1 = self.view.spinBox_darkfield_rho1.value()
-                rho2 = self.view.spinBox_darkfield_rho2.value()
-                for i, img in enumerate(imgs_ch2):
-                    out, mask = self.model.darfield(img, rho1, rho2)
+                    self.masks_ch1[i] = mask if mask.shape == img1.shape else put_back(img1, mask, bbox)
+                else:
+                    restored = put_back(img1, out, bbox)
+                    self.results_ch1[i] = restored
+                    self.masks_ch1[i] = put_back(img1, mask, bbox)
+
+
+            # Process channel 2
+            if img2 is not None:
+                proc_input = content2 if content2 is not None else img2
+                if technique == 0:
+                    out, mask = self.model.darkfield(proc_input, rho1, rho2)
+                elif technique == 1:
+                    out, mask = self.model.phase_shifted_darkfield(proc_input, rho1, rho2, phaseshift)
+                elif technique == 2:
+                    out, mask = self.model.intensity_weighted_darkfield(proc_input, rho1, rho2, alpha)
+                elif technique == 3:
+                    out, mask = self.model.spiral_darkfield(proc_input, rho1, rho2, m)
+                if skip_extract or content2 is None:
                     self.results_ch2[i] = out
-                    self.masks_ch2[i] = mask
-            elif technique == 1:
-                rho1 = self.view.spinBox_psdarkfield_rho1.value()
-                rho2 = self.view.spinBox_psdarkfield_rho2.value()
-                phaseshift = self.view.spinBox_psdarkfield_phaseshift.value()
-                for i, img in enumerate(imgs_ch2):
-                    out, mask = self.model.phase_shifted_darkfield(img, rho1, rho2, phaseshift)
-                    self.results_ch2[i] = out
-                    self.masks_ch2[i] = mask
-            elif technique == 2:
-                rho1 = self.view.spinBox_iwdarkfield_rho1.value()
-                rho2 = self.view.spinBox_iwdarkfield_rho2.value()
-                alpha = self.view.spinBox_iwdarkfield_alpha.value()
-                for i, img in enumerate(imgs_ch2):
-                    out, mask = self.model.intensity_weighted_darkfield(img, rho1, rho2, alpha)
-                    self.results_ch2[i] = out
-                    self.masks_ch2[i] = mask
-            elif technique == 3:
-                rho1 = self.view.spinBox_sdarkfield_rho1.value()
-                rho2 = self.view.spinBox_sdarkfield_rho2.value()
-                m = self.view.spinBox_sdarkfield_m.value()
-                for i, img in enumerate(imgs_ch2):
-                    out, mask = self.model.spiral_darkfield(img, rho1, rho2, m)
-                    self.results_ch2[i] = out
-                    self.masks_ch2[i] = mask
+                    self.masks_ch2[i] = mask if mask.shape == img2.shape else put_back(img2, mask, bbox)
+                else:
+                    restored = put_back(img2, out, bbox)
+                    self.results_ch2[i] = restored
+                    self.masks_ch2[i] = put_back(img2, mask, bbox)
+
         # Always display both channels if available
         if self.results_ch1 is not None and self.results_ch1.shape[0] > 0:
+            print(first_bbox)
+            vmin1, vmax1 = np.min(self.results_ch1[0][first_bbox[0]:first_bbox[0]+first_bbox[2], first_bbox[1]:first_bbox[1]+first_bbox[2]]), np.max(self.results_ch1[0][first_bbox[0]:first_bbox[0]+first_bbox[2], first_bbox[1]:first_bbox[1]+first_bbox[2]])
             self.view.imageLabel_output1.axes.clear()
-            self.view.imageLabel_output1.axes.imshow(self.results_ch1[0], cmap='gray')
+            self.view.imageLabel_output1.axes.imshow(self.results_ch1[0], cmap='gray', vmin=vmin1, vmax=vmax1)
             self.view.imageLabel_output1.draw()
             self.view.saveButton.setEnabled(True)
             if self.masks_ch1 is not None and self.masks_ch1.shape[0] > 0 and hasattr(self.view, 'imageLabel_preview'):
@@ -291,8 +345,9 @@ class PhasePresenter:
                 self.view.imageLabel_preview.draw()
             print(f"Displayed result and mask for channel 1, technique {self.TECHNIQUE_MODEL_MAP.get(technique)}.")
         if self.results_ch2 is not None and self.results_ch2.shape[0] > 0:
+            vmin2, vmax2 = np.min(self.results_ch2[0][first_bbox[0]:first_bbox[0]+first_bbox[2], first_bbox[1]:first_bbox[1]+first_bbox[2]]), np.max(self.results_ch2[0][first_bbox[0]:first_bbox[0]+first_bbox[2], first_bbox[1]:first_bbox[1]+first_bbox[2]])
             self.view.imageLabel_output2.axes.clear()
-            self.view.imageLabel_output2.axes.imshow(self.results_ch2[0], cmap='gray')
+            self.view.imageLabel_output2.axes.imshow(self.results_ch2[0], cmap='gray', vmin=vmin2, vmax=vmax2)
             self.view.imageLabel_output2.draw()
             self.view.saveButton.setEnabled(True)
             if self.masks_ch2 is not None and self.masks_ch2.shape[0] > 0 and hasattr(self.view, 'imageLabel_preview'):
